@@ -11,13 +11,14 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: '首页', link: '/' },
-      { text: '文章', link: '/posts/sync-async-concurrency-parallel' },
+      { text: '文章', link: '/posts/nginx-production-lb-deep-dive' },
     ],
 
     sidebar: [
       {
         text: '学习笔记',
         items: [
+          { text: 'Nginx 实勘、负载均衡与调优实战（含交互动画）', link: '/posts/nginx-production-lb-deep-dive' },
           { text: '同步/异步/并发/并行 + 进程/线程/协程', link: '/posts/sync-async-concurrency-parallel' },
         ],
       },

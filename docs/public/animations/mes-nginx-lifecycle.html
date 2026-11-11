@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>动画：浏览器访问 MES 站点的全程（DNS → nginx → 静态壳 → API 转发 → 渲染）</title>
+<style>
+  :root {
+    --ink: #1a1a1a; --muted: #6b6b6b; --accent: #b3541e;
+    --line: #ddd5c9; --bg: #fdfbf7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Georgia", "Source Han Serif SC", "Noto Serif CJK SC", serif;
+    background: var(--bg); color: var(--ink);
+    max-width: 1000px; margin: 0 auto; padding: .8rem 1rem 1.6rem;
+    line-height: 1.7; font-size: 16px;
+  }
+  h1 { font-size: 1.3rem; border-bottom: 2px solid var(--ink); padding-bottom: .4rem; }
+  code { font-family: "JetBrains Mono", Consolas, monospace; font-size: .88em;
+    background: #f3efe6; border-radius: 4px; padding: .1em .35em; }
+  .meta { color: var(--muted); font-size: .85em; }
+  a { color: var(--accent); }
+
+  .anim-wrap { margin-top: 1.2rem; }
+
+  .fp-bar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .6rem; }
+  .fp-bar button {
+    font-family: inherit; font-size: .92em; padding: .35rem .8rem;
+    border: 1.5px solid var(--ink); border-radius: 5px; background: #fffdf9;
+    cursor: pointer; line-height: 1.4;
+  }
+  .fp-bar button:hover { background: #f3efe6; }
+  .fp-bar .fp-play.playing { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .fp-title { margin-left: auto; font-size: .95em; color: var(--muted); font-style: italic; }
+  .fp-dots { display: flex; gap: .35rem; margin-bottom: .8rem; }
+  .fp-dot { width: 13px; height: 13px; border-radius: 50%; border: 1.5px solid var(--line); background: transparent; padding: 0; cursor: pointer; }
+  .fp-dot.on { background: var(--accent); border-color: var(--accent); }
+
+  .fp-stage-outer { overflow-x: auto; border: 2px solid var(--ink); border-radius: 8px; background:
+    repeating-linear-gradient(0deg, transparent 0 34px, #f0ebe0 34px 35px),
+    repeating-linear-gradient(90deg, transparent 0 34px, #f0ebe0 34px 35px), #faf7f0; }
+  .fp-stage { position: relative; width: 920px; height: 470px; }
+  .fp-edges { position: absolute; inset: 0; pointer-events: none; }
+  .fp-edge { stroke: #cfc5b4; stroke-width: 2; stroke-dasharray: 7 7; }
+
+  .fp-node {
+    position: absolute; border: 2px solid var(--ink); border-radius: 8px;
+    background: #fffdf9; padding: .45rem .6rem; font-size: .84em; line-height: 1.45;
+    box-shadow: 2px 3px 0 rgba(26,26,26,.14); transition: box-shadow .25s, transform .25s;
+  }
+  .fp-node b { font-size: 1.02em; }
+  .fp-node .sub { color: var(--muted); font-size: .88em; }
+  .fp-node.fp-hot { box-shadow: 0 0 0 4px rgba(179,84,30,.45), 3px 4px 0 rgba(26,26,26,.18); transform: translateY(-2px); }
+  .fp-node.fp-hit { background: #f7e8d8; }
+
+  .fp-screen {
+    margin-top: .35rem; background: #eee9df; border: 1.5px solid var(--line);
+    border-radius: 4px; min-height: 66px; padding: .3rem .4rem; font-size: .78em;
+  }
+  .scr-blank { color: var(--muted); text-align: center; margin-top: 1.4rem; }
+  .scr-code { font-family: Consolas, monospace; font-size: .92em; color: #555; white-space: pre-wrap; }
+  .scr-bar { height: 9px; background: #cfc5b4; border-radius: 3px; margin: 5px 0; }
+  .scr-bar.short { width: 55%; }
+  .scr-fill { height: 13px; border-radius: 3px; margin: 5px 0; background: #8fb98f; }
+  .scr-caption { text-align: center; color: var(--muted); font-size: .88em; }
+  .scr-chip { display: inline-block; background: #ffe9d6; border: 1px solid var(--accent);
+    border-radius: 4px; padding: 0 .3em; font-family: Consolas, monospace; font-size: .95em; }
+
+  .fp-route { margin-top: .3rem; border: 1.5px dashed var(--line); border-radius: 5px;
+    padding: .15rem .4rem; font-family: Consolas, monospace; font-size: .9em; color: #555; }
+  .fp-route.fp-hot { border-color: var(--accent); color: var(--accent); background: #fdf1e6; }
+
+  .file-chip { display: inline-block; background: #e8f0e6; border: 1px solid #2e7d32;
+    border-radius: 4px; padding: 0 .3em; margin: 1px 2px 1px 0;
+    font-family: Consolas, monospace; font-size: .92em; }
+
+  .fp-packets { position: absolute; inset: 0; pointer-events: none; }
+  .fp-packet {
+    position: absolute; left: 0; top: 0; white-space: nowrap;
+    color: #fff; font-size: 12.5px; font-family: "JetBrains Mono", Consolas, monospace;
+    padding: 3px 10px; border-radius: 999px; box-shadow: 0 2px 6px rgba(0,0,0,.28); z-index: 30;
+  }
+  .k-req  { background: #1e6091; }
+  .k-resp { background: #b3541e; }
+  .k-file { background: #2e7d32; }
+  .k-dns  { background: #6a4c93; }
+  .k-data { background: #ad1457; }
+
+  .fp-panels { display: flex; gap: .9rem; margin-top: .9rem; align-items: stretch; }
+  .fp-note { flex: 1.25; background: #fffdf9; border: 1.5px solid var(--line); border-radius: 8px;
+    padding: .8rem 1rem; font-size: .98em; }
+  .fp-note .tag, .fp-evidence .tag { display: block; font-size: .78em; letter-spacing: .12em;
+    color: var(--muted); margin-bottom: .3rem; }
+  .fp-evidence { flex: 1; background: #14110c; color: #d8c9a3; border-radius: 8px;
+    padding: .8rem 1rem; font-family: "JetBrains Mono", Consolas, monospace; font-size: .8em;
+    white-space: pre-wrap; line-height: 1.65; }
+  .fp-evidence .tag { color: #8a7a55; }
+  .fp-evidence b { color: #f0c987; font-weight: normal; }
+
+  .lab { margin-top: 2rem; border: 2px solid var(--accent); border-radius: 8px; padding: 1rem 1.2rem; background: #fffdf9; }
+  .lab h3 { margin-top: 0; color: var(--accent); }
+  .lab button { font-family: inherit; font-size: 1em; padding: .5rem 1.1rem; border: 2px solid var(--ink);
+    border-radius: 6px; background: #fdf1e6; cursor: pointer; }
+  .lab button:hover { background: #f7e3cd; }
+  .lab .msg { margin-top: .6rem; min-height: 1.6em; font-size: .95em; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2.5px; border-radius: 4px;
+    padding: 0 .4em; font-family: inherit; font-size: .88em; background: #f3efe6; }
+</style>
+</head>
+<body>
+
+<h1>动画：浏览器访问 MES 站点的全程</h1>
+<p class="meta">右下角"证据"栏是真实服务器上抓的原文（已脱敏） ｜ 操作：<kbd>←</kbd><kbd>→</kbd> 逐帧，<kbd>空格</kbd> 自动播放</p>
+
+<div class="anim-wrap">
+  <div class="fp-bar">
+    <button data-fp="reset">⏮ 重置</button>
+    <button data-fp="prev">◀ 上一帧</button>
+    <button data-fp="play" class="fp-play">▶ 自动播放</button>
+    <button data-fp="next">下一帧 ▶</button>
+    <span class="fp-title" id="fpTitle"></span>
+  </div>
+  <div class="fp-dots" id="fpDots"></div>
+
+  <div class="fp-stage-outer">
+    <div class="fp-stage" id="stage">
+
+      <div class="fp-node" data-node="browser" style="left:18px; top:130px; width:212px;">
+        <b>🧑‍💻 你的浏览器</b>
+        <div class="fp-screen" id="screen"><div class="scr-blank">（空白新标签页）</div></div>
+      </div>
+
+      <div class="fp-node" data-node="dns" style="left:390px; top:10px; width:172px;">
+        <b>📖 DNS 电话簿</b><br>
+        <span class="sub">公司域控 DNS<br>只管"名字→IP"</span>
+      </div>
+
+      <div class="fp-node" data-node="nginx" style="left:362px; top:118px; width:230px;">
+        <b>🚪 nginx/1.16.1</b> <span class="sub">:80 门卫</span>
+        <div class="fp-route" data-node="route-static">location / &nbsp;→ 发文件</div>
+        <div class="fp-route" data-node="route-api">location /api/ → 转发出去</div>
+      </div>
+
+      <div class="fp-node" data-node="dist" style="left:340px; top:330px; width:262px;">
+        <b>🗄️ 磁盘 dist/ 文件柜</b><br>
+        <span class="file-chip">index.html · 1428B</span><span class="file-chip">app.c1e58aa0.js · 40KB</span>
+        <div class="sub">2024-02-18 打包上传，之后没人动过</div>
+      </div>
+
+      <div class="fp-node" data-node="java" style="left:690px; top:118px; width:200px;">
+        <b>☕ Java 后端</b><br>
+        <span class="sub" id="javaAddr">:8080 @ 10.0.0.11 本机</span><br>
+        <span class="sub">查库、算业务、吐 JSON</span>
+      </div>
+
+      <div class="fp-node" data-node="mysql" style="left:718px; top:330px; width:168px;">
+        <b>🐬 MySQL</b><br>
+        <span class="sub">工单/物料/报表的真数据</span>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="fp-panels">
+    <div class="fp-note"><span class="tag">大白话解说</span><span id="fpNote"></span></div>
+    <div class="fp-evidence"><span class="tag">抓包证据（已脱敏）</span><span id="fpEvidence"></span></div>
+  </div>
+</div>
+
+<div class="lab" id="lab">
+  <h3>🔥 实验：后端搬家（点按钮亲手试）</h3>
+  <p>Java 换到新机器 <b>10.0.0.13</b>。生产上的改法：登服务器把 nginx 配置里的一行
+  <code>proxy_pass</code> 从 <code>http://127.0.0.1:8080</code> 改成 <code>http://10.0.0.13:8080</code>，
+  <code>nginx -s reload</code>。完事。点下面按钮模拟：</p>
+  <button id="labBtn">🚚 Java 搬去 10.0.0.13</button>
+  <div class="msg" id="labMsg">（还没搬）</div>
+</div>
+
+<p class="meta">动画引擎 flow-player（自研可复用组件，~140 行原生 JS）。看懂了回正文做小结，有不懂的留言。</p>
+
+<script>
+/* flow-player · 通用帧动画引擎（节点报文飞行） */
+window.FlowPlayer = (function () {
+  const SVGNS = "http://www.w3.org/2000/svg";
+
+  function center(el, stage) {
+    const s = stage.getBoundingClientRect(), r = el.getBoundingClientRect();
+    return { x: r.left - s.left + r.width / 2, y: r.top - s.top + r.height / 2 };
+  }
+
+  function init(opts) {
+    const stage = opts.stage, frames = opts.frames;
+    const nodes = {};
+    stage.querySelectorAll("[data-node]").forEach((n) => (nodes[n.dataset.node] = n));
+
+    let svg = stage.querySelector("svg.fp-edges");
+    if (!svg) {
+      svg = document.createElementNS(SVGNS, "svg");
+      svg.classList.add("fp-edges");
+      stage.prepend(svg);
+    }
+    const size = () => {
+      svg.setAttribute("width", stage.offsetWidth);
+      svg.setAttribute("height", stage.offsetHeight);
+    };
+    size();
+    (opts.edges || []).forEach(([a, b]) => {
+      const A = center(nodes[a], stage), B = center(nodes[b], stage);
+      const l = document.createElementNS(SVGNS, "line");
+      l.setAttribute("x1", A.x); l.setAttribute("y1", A.y);
+      l.setAttribute("x2", B.x); l.setAttribute("y2", B.y);
+      l.classList.add("fp-edge");
+      svg.appendChild(l);
+    });
+
+    const layer = document.createElement("div");
+    layer.className = "fp-packets";
+    stage.appendChild(layer);
+
+    let idx = -1, auto = false, autoTimer = null, busy = false;
+
+    const dots = opts.dots;
+    if (dots) {
+      frames.forEach((_, k) => {
+        const d = document.createElement("button");
+        d.className = "fp-dot";
+        d.title = frames[k].title || ("第" + (k + 1) + "帧");
+        d.onclick = () => go(k);
+        dots.appendChild(d);
+      });
+    }
+
+    function clearPackets() { layer.innerHTML = ""; }
+
+    function setHighlight(ids) {
+      Object.entries(nodes).forEach(([k, el]) =>
+        el.classList.toggle("fp-hot", (ids || []).includes(k)));
+    }
+
+    function fly(p) {
+      return new Promise((res) => {
+        const A = center(nodes[p.from], stage), B = center(nodes[p.to], stage);
+        const el = document.createElement("div");
+        el.className = "fp-packet k-" + (p.kind || "req");
+        el.textContent = p.label;
+        layer.appendChild(el);
+        const w = el.offsetWidth, h = el.offsetHeight;
+        const anim = el.animate(
+          [
+            { transform: `translate(${A.x - w / 2}px, ${A.y - h / 2 - 14}px)`, opacity: 0 },
+            { transform: `translate(${A.x - w / 2}px, ${A.y - h / 2 - 14}px)`, opacity: 1, offset: 0.12 },
+            { transform: `translate(${B.x - w / 2}px, ${B.y - h / 2 - 14}px)`, opacity: 1, offset: 0.9 },
+            { transform: `translate(${B.x - w / 2}px, ${B.y - h / 2 - 14}px)`, opacity: 0 }
+          ],
+          { duration: opts.speed || 1150, easing: "cubic-bezier(.45,.05,.55,.95)" }
+        );
+        nodes[p.to].classList.add("fp-hit");
+        setTimeout(() => nodes[p.to].classList.remove("fp-hit"), 420);
+        anim.onfinish = () => { el.remove(); res(); };
+      });
+    }
+
+    async function runFrame(f) {
+      if (f.mutate) f.mutate(stage);
+      setHighlight(f.highlight);
+      for (const p of f.packets || []) await fly(p);
+    }
+
+    function paintMeta(f) {
+      if (opts.title) opts.title.innerHTML = f.title || "";
+      if (opts.note) opts.note.innerHTML = f.note || "";
+      if (opts.evidence) opts.evidence.innerHTML = f.evidence || "";
+      if (dots) [...dots.children].forEach((d, k) =>
+        d.classList.toggle("on", k === idx));
+      if (opts.onFrame) opts.onFrame(f, idx);
+    }
+
+    async function go(k) {
+      if (busy || k < 0 || k >= frames.length) return;
+      idx = k; busy = true;
+      clearPackets(); setHighlight([]);
+      paintMeta(frames[idx]);
+      await runFrame(frames[idx]);
+      busy = false;
+      if (auto) scheduleAuto();
+    }
+
+    function scheduleAuto() {
+      clearTimeout(autoTimer);
+      const f = frames[idx];
+      const pktMs = ((f.packets || []).length * (opts.speed || 1150)) + 400;
+      autoTimer = setTimeout(() => {
+        if (!auto) return;
+        if (idx >= frames.length - 1) { toggleAuto(false); return; }
+        go(idx + 1);
+      }, pktMs + 2100);
+    }
+
+    function toggleAuto(force) {
+      auto = force !== undefined ? force : !auto;
+      document.querySelectorAll(".fp-play").forEach((b) =>
+        b.classList.toggle("playing", auto));
+      if (auto) { if (idx >= frames.length - 1) go(0); else scheduleAuto(); }
+      else clearTimeout(autoTimer);
+    }
+
+    const next = () => !busy && go(Math.min(idx + 1, frames.length - 1));
+    const prev = () => !busy && go(Math.max(idx - 1, 0));
+
+    document.querySelectorAll("[data-fp]").forEach((b) => {
+      const act = b.dataset.fp;
+      b.onclick = () => ({
+        next, prev, play: () => toggleAuto(), reset: () => { toggleAuto(false); go(0); }
+      }[act]());
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight") next();
+      else if (e.key === "ArrowLeft") prev();
+      else if (e.key === " ") { e.preventDefault(); toggleAuto(); }
+    });
+
+    go(0);
+    return { go, next, prev, fly };
+  }
+
+  return { init };
+})();
+</script>
+<script>
+const screen = () => document.getElementById("screen");
+const SCREENS = {
+  blank: '<div class="scr-blank">（空白新标签页）</div>',
+  shell: '<div class="scr-caption">拿到的"页面"：</div>'
+       + '<div class="scr-code">&lt;div id=app&gt;&lt;/div&gt; ←空的\n&lt;script src=/js/app.c1e58aa0.js&gt;</div>',
+  skeleton: '<div class="scr-caption">Vue 骨架（没数据）</div>'
+       + '<div class="scr-bar"></div><div class="scr-bar short"></div><div class="scr-bar"></div>',
+  formula: '<div class="scr-caption">JS 在拼地址：</div>'
+       + '<span class="scr-chip">window.VUE_APP_URL="/api/"</span><br><span style="color:#999">＋ 打包时烤死</span><br>'
+       + '<span class="scr-chip">/mes/order/listPage</span><br><span style="color:#999">＝ 相对路径，没有主机名！</span>',
+  data: '<div class="scr-caption">工单列表 ✔ 有货了</div>'
+       + '<div class="scr-fill"></div><div class="scr-fill" style="width:88%"></div><div class="scr-fill" style="width:72%"></div>'
+};
+
+const frames = [
+  {
+    title: "第1步 · 你敲下回车",
+    note: "你在地址栏敲下 <b>http://mes.example.com/</b> 回车。此刻浏览器手里只有一个<b>名字</b>——它不知道这台机器在哪、归谁管。",
+    evidence: "浏览器：先翻自己的 DNS 缓存…\n没有 → 得去问公司电话簿",
+    highlight: ["browser"],
+    mutate: () => (screen().innerHTML = SCREENS.blank)
+  },
+  {
+    title: "第2步 · 查电话簿（DNS）",
+    packets: [
+      { from: "browser", to: "dns", label: "mes.example.com 是谁？", kind: "dns" },
+      { from: "dns", to: "browser", label: "10.0.0.11", kind: "dns" }
+    ],
+    note: "公司 DNS（域控）把名字翻成内网 IP <b>10.0.0.11</b>——MES 生产服务器，离你 1ms。电话簿只干这一件事。",
+    evidence: "$ nslookup mes.example.com\n  → <b>10.0.0.11</b>\n  服务器: dns.corp.example\n$ ping 10.0.0.11 → 1ms 通",
+    highlight: ["browser", "dns"]
+  },
+  {
+    title: "第3步 · 第一发请求 GET /",
+    packets: [
+      { from: "browser", to: "nginx", label: "GET /  Host: mes.example.com", kind: "req" }
+    ],
+    note: "浏览器对 10.0.0.11 的 <b>80 端口</b>喊话。接电话的<b>不是 Java</b>，是门卫 <b>nginx/1.16.1</b>——生产环境所有流量先进它家。",
+    evidence: "$ curl -I http://mes.example.com/\n  Server: <b>nginx/1.16.1</b>  ← 门卫的工牌",
+    highlight: ["browser", "nginx"]
+  },
+  {
+    title: "第4步 · location /：从文件柜掏页面",
+    packets: [
+      { from: "nginx", to: "dist", label: "读 index.html", kind: "file" },
+      { from: "dist", to: "nginx", label: "1428 字节", kind: "file" },
+      { from: "nginx", to: "browser", label: "HTML 空壳", kind: "file" }
+    ],
+    note: "路径是 <code>/</code>，nginx 走<b>发文件</b>通道：从磁盘 dist 目录把 index.html 原样扔回。<b>1428 字节里一个业务数据都没有</b>——就一个空 div 加一句「请开 JavaScript」。",
+    evidence: "200 OK · Content-Length: <b>1428</b>\nLast-Modified: 2024-02-18 · ETag · Accept-Ranges\n= 磁盘静态文件专属指纹（Java 渲不出这套）",
+    highlight: ["nginx", "route-static", "dist"],
+    mutate: () => (screen().innerHTML = SCREENS.shell)
+  },
+  {
+    title: "第5步 · 拉 JS，Vue 起床",
+    packets: [
+      { from: "browser", to: "nginx", label: "GET /js/app.c1e58aa0.js", kind: "req" },
+      { from: "nginx", to: "browser", label: "40KB JS", kind: "file" }
+    ],
+    note: "浏览器解析壳，看到 script 标签——<b>又是相对路径</b>，还是管 nginx 要。40KB JS 到手后 Vue 启动，骨架画出来了。但骨架是空架子：没有工单，没有报表。",
+    evidence: "GET /js/app.c1e58aa0.js → 200，<b>40304 字节</b>\n（线上真实包，2024-02-18 构建）",
+    highlight: ["browser", "nginx", "route-static"],
+    mutate: () => (screen().innerHTML = SCREENS.skeleton)
+  },
+  {
+    title: "第6步 · 关键帧：JS 拼 API 地址",
+    note: "页面要数据了。JS 拼地址：<b>烤死的变量</b> <code>\"/api/\"</code>（打包那天从 .env.production 编译进 JS，改不动了）＋ 接口路径。<b>没有主机名！</b>浏览器自动补全成<b>当前域名</b>——还是发给 mes.example.com 的 nginx。",
+    evidence: "下载线上 app.c1e58aa0.js 反查：\n  window.VUE_APP_URL = <b>\"/api/\"</b>  ← 打包时烤死\n\n仓库 D:/mes-web/.env.production:\n  VUE_APP_URL = /api/\n.env.development:\n  VUE_APP_URL = http://localhost:8080",
+    highlight: ["browser"],
+    mutate: () => (screen().innerHTML = SCREENS.formula)
+  },
+  {
+    title: "第7步 · location /api/：这单转出去",
+    packets: [
+      { from: "browser", to: "nginx", label: "GET /api/mes/order/listPage", kind: "req" },
+      { from: "nginx", to: "java", label: "proxy_pass 转发", kind: "req" }
+    ],
+    note: "nginx 看到前缀 <code>/api/</code>，走<b>转发</b>通道：这单不是我的活，转给 <b>8080 端口的 Java</b>。浏览器全程蒙在鼓里——它以为自己一直在跟 mes.example.com 聊天，根本不知道 Java 存在。",
+    evidence: "三路指纹比对，响应体一字不差：\n  http://10.0.0.11/api/   → 53B JSON\n  http://10.0.0.11:8080/  → 同一个\n  http://10.0.0.11:8080/api/ → 同一个\n{code:404, message:找不到资源} = Java 说的\n⇒ <b>Java 真身在 :8080</b>",
+    highlight: ["nginx", "route-api", "java"]
+  },
+  {
+    title: "第8步 · Java 干活，JSON 回程",
+    packets: [
+      { from: "java", to: "mysql", label: "SELECT 工单…", kind: "data" },
+      { from: "mysql", to: "java", label: "数据行", kind: "data" },
+      { from: "java", to: "nginx", label: "JSON", kind: "resp" },
+      { from: "nginx", to: "browser", label: "JSON", kind: "resp" }
+    ],
+    note: "Java 查库，把工单装成 JSON <b>原路送回</b>：Java→nginx→浏览器。Content-Type 是 application/json——<b>内容出自 Java，nginx 只是跑腿</b>。",
+    evidence: "Content-Type: application/json;charset=UTF-8\nServer: nginx/1.16.1\n（传输经 nginx，内容出自 Java）",
+    highlight: ["java", "mysql", "nginx"]
+  },
+  {
+    title: "第9步 · 渲染！页面终于有货",
+    note: "JS 拿到 JSON 填进表格，页面「有货」了。<b>复盘：页面是死的静态文件（第①次往返），数据是活的 API 请求（第②次往返）</b>——两次完全独立，这就是前后端分离。",
+    evidence: "同一套代码，两种活法：\n开发  VUE_APP_URL=http://localhost:8080 直连\n生产  VUE_APP_URL=/api/ 同域走 nginx\n全靠 .env 切换",
+    highlight: ["browser"],
+    mutate: () => (screen().innerHTML = SCREENS.data)
+  },
+  {
+    title: "总账 · 打包时定前缀，运行时定主机",
+    note: "回答最初的问题——「打包时确定的吗？」：<b>典型 MES 是②③合体</b>。前缀 <code>/api/</code> 打包时烤进 JS；主机 mes.example.com 运行时随域名定，后端在哪由 nginx 一行 proxy_pass 说了算。<b>换后端机器/端口 → 只改 nginx，前端零改动；换前缀 → 才要重新打包</b>。往下滚，点「后端搬家」亲手试。",
+    evidence: "未定案项（登服务器才算数）：\n· nginx.conf 原文 / proxy_pass 写法\n· upstream 是否挂了备机\n（外部探测定不了案）",
+    highlight: ["browser", "nginx", "java"]
+  }
+];
+
+const player = FlowPlayer.init({
+  stage: document.getElementById("stage"),
+  frames,
+  edges: [["browser", "dns"], ["browser", "nginx"], ["nginx", "dist"], ["nginx", "java"], ["java", "mysql"]],
+  title: document.getElementById("fpTitle"),
+  note: document.getElementById("fpNote"),
+  evidence: document.getElementById("fpEvidence"),
+  dots: document.getElementById("fpDots")
+});
+
+/* ── 后端搬家实验 ── */
+(function () {
+  const btn = document.getElementById("labBtn");
+  const msg = document.getElementById("labMsg");
+  const javaAddr = document.getElementById("javaAddr");
+  const routeApi = document.querySelector('[data-node="route-api"]');
+  let moved = false, busy = false;
+
+  btn.onclick = async () => {
+    if (busy) return;
+    busy = true;
+    moved = !moved;
+    if (moved) {
+      routeApi.innerHTML = "location /api/ → proxy_pass http://10.0.0.13:8080";
+      javaAddr.innerHTML = ":8080 @ <b>10.0.0.13 新机</b>";
+      btn.textContent = "📦 搬回 10.0.0.11 本机";
+      msg.innerHTML = "nginx -s reload 完成。<b>注意：浏览器和那个 2024 年的前端包，一个字节都没动。</b>现在再发一单试试——";
+      await player.fly({ from: "browser", to: "nginx", label: "GET /api/mes/order/listPage", kind: "req" });
+      await player.fly({ from: "nginx", to: "java", label: "转给新机器", kind: "req" });
+      await player.fly({ from: "java", to: "nginx", label: "JSON 照常", kind: "resp" });
+      await player.fly({ from: "nginx", to: "browser", label: "JSON 照常", kind: "resp" });
+      msg.innerHTML = "<b>通了。</b>因为前端只认相对路径 /api/——它只跟「当前域名」说话，后端在哪 nginx 说了算。这就是同域反代最大的红利：换后端 = 改一行配置。";
+    } else {
+      routeApi.innerHTML = "location /api/ → 转发出去";
+      javaAddr.innerHTML = ":8080 @ 10.0.0.11 本机";
+      btn.textContent = "🚚 Java 搬去 10.0.0.13";
+      msg.innerHTML = "（已搬回本机）";
+    }
+    busy = false;
+  };
+})();
+</script>
+</body>
+</html>
