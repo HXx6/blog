@@ -1,13 +1,13 @@
 ---
-title: 一次把分布式锁拆到底朝天：从一行 tryLock 到 Redisson 的三段 Lua
+title: 一颗 Redis 养活一个微服务集群：从分布式锁的三段 Lua 到限流、缓存与发号器
 date: 2026-11-12
-tags: [Redis, 分布式锁, Redisson, 分布式系统, 定时任务]
-description: 看完《Redis 是什么》视频，对着自己维护的 MES 生产代码问了一句"定时任务部署两份怎么保证只跑一次"，从业务代码里唯一的一行 tryLock 出发，沿依赖链拆到 m2 仓库里 redisson-3.10.6.jar 的 class 常量池，把挂牌、续期、摘牌三段 Lua 原文抠了出来。含 14 帧交互动画。
+tags: [Redis, 分布式锁, Redisson, 限流, 缓存, 分布式系统]
+description: 看完《Redis 是什么》视频，对着自己维护的 MES 生产代码问了一句"定时任务部署两份怎么保证只跑一次"，从业务代码里唯一的一行 tryLock 出发，沿依赖链拆到 m2 仓库里 redisson-3.10.6.jar 的 class 常量池，把挂牌、续期、摘牌三段 Lua 原文抠了出来；顺手把这颗 Redis 在集群里的其他营业额——TTL 限流、字典/权限缓存、INCR 发号器——也盘了一遍。含 14 帧交互动画。
 ---
 
-# 一次把分布式锁拆到底朝天：从一行 tryLock 到 Redisson 的三段 Lua
+# 一颗 Redis 养活一个微服务集群：从分布式锁的三段 Lua 到限流、缓存与发号器
 
-> 起因：看了个《Redis 是什么》的入门视频，回头对自己维护的 MES 系统（Java 微服务，基于开源框架 BudWk 改造）冒出一个问题——定时任务要是部署两份，怎么保证只跑一次？顺着这个问题，我从业务代码里**唯一的一行** `tryLock` 出发，一路拆到本地 m2 仓库里 redisson-3.10.6.jar 的字节码常量池，把三段 Lua 原文抠了出来。这篇是总账。（文中系统与 IP 已脱敏，但每一行代码证据都是真的。）
+> 起因：看了个《Redis 是什么》的入门视频，回头对自己维护的 MES 系统（Java 微服务，基于开源框架 BudWk 改造）冒出一个问题——定时任务要是部署两份，怎么保证只跑一次？顺着这个问题，我从业务代码里**唯一的一行** `tryLock` 出发，一路拆到本地 m2 仓库里 redisson-3.10.6.jar 的字节码常量池，把三段 Lua 原文抠了出来；末尾把这颗 Redis 在集群里的其他营业额——限流、缓存、发号器——也盘了一遍。这篇是总账。（文中系统与 IP 已脱敏，但每一行代码证据都是真的。）
 
 ## 先看动画：两台实例抢一块牌子
 
@@ -147,6 +147,69 @@ try {
 按教科书语义推，watchdog 会在进程活着时一直续期，那下一轮任务岂不该被上一轮的锁挡住？但生产上一轮轮跑得好好的。为什么没人发现？因为**当前是单实例部署，锁根本没有竞争者**——锁多活 30 秒没人等着用。
 
 定案方法很朴素（只读操作）：任务触发后在 Redis 上 `TTL wk:job:execute:{bean}:{job}` 连续观察一分钟——**TTL 在 30 秒内归零 = 靠过期释放；TTL 一直在 30 上下徘徊 = watchdog 在续期**。一眼分辨。留个坑，后续补结论。
+
+## 七、锁之外：这颗 Redis 还为集群干了什么
+
+锁只是这颗 Redis 的一小块营业额。镜头拉远——同一个实例、同一批连接池（每个微服务进程启动时各揣一个，池大小 100，借出前先 PING 防死连接）上，还跑着三类最基础的用法，每一类都值得认识一遍。
+
+### ① 防爆破限流：把 TTL 当"刑期"用
+
+业务故事：凌晨有人拿字典爆破登录接口。防线是每个 IP 一个计数器，计满判刑——判刑的"刑期"就是 key 的 TTL（开源框架 wk-ucenter 模块 `AuthServiceImpl` 真码）：
+
+```java
+int count = Integer.parseInt(Strings.sNull(
+    redisService.get("wk:checkLoginname:" + ip), "0"));      // ① 读计数，没见过=0
+if (count > nameRetryNum - 1) {                               // ② 超阈值 → 直接拒绝
+    long ttl = redisService.ttl("wk:checkLoginname:" + ip);   //    剩余刑期还能现场读出来
+    throw new BaseException("您的IP已被锁定，请" + ttl/60 + "分" + ttl%60 + "秒后重试");
+}
+// ……密码校验失败之后：
+redisService.setex("wk:checkLoginname:" + ip, nameTimeout,   // ③ 计数+1，带 TTL 写回
+    String.valueOf(++count));
+```
+
+细品三个设计：**Redis 里的真实样子**是 `wk:checkLoginname:10.0.0.23 → "5"，TTL 437s`——第 6 次请求连 SQL 都不会执行，判刑期间数据库零负担；**TTL 到点 key 自动蒸发**，"解禁"不需要任何清理代码；**为什么不用 MySQL**——每次失败都要读写一次的高频计数、刑期天然等于 TTL、丢了还能重建的数据，三样都不配进真相库。
+
+挑刺一处：每次失败 `setex` 都会整体覆盖重置 TTL，这是**滑动窗口**——攻击者只要不停手，锁就永远续期，歪打正着比教科书的固定窗口（`INCR` + `EXPIRE key ttl NX`）更狠。面试题"固定窗口 vs 滑动窗口限流"的活例子。
+
+### ② 基础数据缓存：字典与权限，"参数即身份"
+
+系统里 20+ 个 Service 在用同一套注解缓存，几乎全是基础/配置类数据（数据字典、行政区划、计量单位、用户权限、菜单）。用法两注解：
+
+```java
+// 类级默认：缓存命名空间 + 统一 TTL（秒）
+@CacheDefaults(cacheName = "wk:wkcache:sys_user", cacheLiveTime = 7200)
+public class SysUserServiceImpl ... {
+
+    @CacheResult(cacheKey = "${userId}_getPermissionList")      // 单参数做身份
+    public List<String> getPermissionList(String userId) { ... }
+
+    @CacheResult(cacheKey = "${userId}_${appId}_getMenuList")   // 多参数组合做身份
+    public List<Sys_menu> getMenuList(String userId, String appId) { ... }
+}
+```
+
+最终 Redis key = `cacheName + ":" + cacheKey`，例如 `wk:wkcache:sys_user:zhangsan_getPermissionList`（TTL 7200）——**模板里的 `${形参名}` 被替换成实参值，不同用户天然落进不同的 K**，这就是"参数即身份"。
+
+比用法更重要的是**什么数据配缓存**，这家里有一张干净的分层表：读极多 + 写极少 + 全局共享 + 容忍秒级旧的基础数据才挂缓存；全库**零处**库存/单据/余额等交易数据挂缓存——强一致数据永远直读 DB。一句话：**交易数据直读，基础数据才缓存**。
+
+再送一个挑刺彩蛋（实勘发现）：**private 方法上的缓存注解是死的**。注解框架注册拦截器的入口用的是 Java 反射的 `clazz.getMethods()`——它只返回 public 方法，private 方法进不了注册循环，拦截器从未挂上，每次调用直通数据库。注解不是法术，背后是 AOP 拦截器在干活，而拦截器有一张只收 public 的名单。
+
+### ③ 发号器：INCR 原子自增，日期进 key
+
+业务单号 `SO20261112-0001` 这种"每天从 1 开始"的号，用 `INCR` 发：key 里带日期（如 `daily:count:20261112`），单线程自增保证多服务并发取号不重不漏，日期一变 key 换新、计数自然归零——又是"零清理代码"的设计。比 MySQL 自增列的好处：跨服务共享一个号段来源、不占数据库自增锁。
+
+### 收尾：同一颗 Redis 的五种角色
+
+| 角色 | 核心命令 | 一句话 |
+|---|---|---|
+| 限流计数器 | GET + SETEX | 计数带刑期，到点自动赦免 |
+| 基础数据缓存 | GET + SETEX(7200) | 读多写少的数据快照，参数即身份 |
+| 发号器 | INCR | 原子自增，日期进 key 每天归零 |
+| 分布式锁 | EVAL（三段 Lua） | key 当牌子用 |
+| 广播/汇报频道 | PUBLISH / SUBSCRIBE | 声波不是存储，喊完即逝 |
+
+前三样都是 Jedis 客户端直连干的粗活，只有锁那一档请了 Redisson——两套客户端吃两段配置（`redis:` 段管数据，`redisson:` 段管协调），**key 当数据用，也当牌子用**，一颗 Redis 两种活法。
 
 ## 尾声：方法比结论值钱
 

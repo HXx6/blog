@@ -11,21 +11,16 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: '首页', link: '/' },
-      { text: '文章', link: '/posts/nginx-production-lb-deep-dive' },
+      { text: '文章', link: '/posts/system-design/redis-distributed-lock-deep-dive' },
     ],
 
     sidebar: [
       {
         text: '系统设计学习',
         items: [
-          { text: '分布式锁拆解：从一行 tryLock 到 Redisson 的三段 Lua（含交互动画）', link: '/posts/system-design/redis-distributed-lock-deep-dive' },
-        ],
-      },
-      {
-        text: '学习笔记',
-        items: [
-          { text: 'Nginx 实勘、负载均衡与调优实战（含交互动画）', link: '/posts/nginx-production-lb-deep-dive' },
-          { text: '同步/异步/并发/并行 + 进程/线程/协程', link: '/posts/sync-async-concurrency-parallel' },
+          { text: '一颗 Redis 养活微服务集群：分布式锁三段 Lua + 限流/缓存/发号器（含交互动画）', link: '/posts/system-design/redis-distributed-lock-deep-dive' },
+          { text: 'Nginx 实勘、负载均衡与调优实战（含交互动画）', link: '/posts/system-design/nginx-production-lb-deep-dive' },
+          { text: '同步/异步/并发/并行 + 进程/线程/协程', link: '/posts/system-design/sync-async-concurrency-parallel' },
         ],
       },
     ],

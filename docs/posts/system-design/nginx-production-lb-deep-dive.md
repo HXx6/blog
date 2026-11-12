@@ -134,4 +134,4 @@ nginx 自身的高可用阶梯：systemd `Restart=always`（防进程死）→ *
 - [死磕 nginx 系列——nginx 入门（select vs epoll）](https://www.cnblogs.com/biglittleant/p/8979063.html)
 - [探索惊群③——nginx 惊群现象](https://zhuanlan.zhihu.com/p/452979435)
 
-系列上一篇：[同步/异步/并发/并行 + 进程/线程/协程](/posts/sync-async-concurrency-parallel)（本文"多进程 vs 多线程"的地基）
+系列上一篇：[同步/异步/并发/并行 + 进程/线程/协程](/posts/system-design/sync-async-concurrency-parallel)（本文"多进程 vs 多线程"的地基）
