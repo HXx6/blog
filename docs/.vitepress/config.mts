@@ -4,7 +4,7 @@ export default defineConfig({
   lang: 'zh-CN',
   base: '/blog/',
   title: 'links 的技术博客',
-  description: 'MES 开发者的 AI 应用学习笔记：LangChain / LangGraph / Agent 工程 / 并发与异步',
+  description: 'MES 开发者的技术学习笔记：系统设计 / LangChain / LangGraph / Agent 工程 / 并发与异步',
   cleanUrls: true,
   lastUpdated: true,
 
@@ -15,6 +15,12 @@ export default defineConfig({
     ],
 
     sidebar: [
+      {
+        text: '系统设计学习',
+        items: [
+          { text: '分布式锁拆解：从一行 tryLock 到 Redisson 的三段 Lua（含交互动画）', link: '/posts/system-design/redis-distributed-lock-deep-dive' },
+        ],
+      },
       {
         text: '学习笔记',
         items: [

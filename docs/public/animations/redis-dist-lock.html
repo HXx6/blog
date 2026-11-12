@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>动画：MES 定时任务的分布式锁——两台实例抢一块牌子</title>
+<style>
+/* agent-eng-practice 教学工作区 · 共享样式 */
+:root {
+  --ink: #1a1a1a;
+  --muted: #6b6b6b;
+  --accent: #b3541e;
+  --line: #ddd5c9;
+  --bg: #fdfbf7;
+  --ok: #2e7d32;
+  --bad: #c62828;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: "Georgia", "Source Han Serif SC", "Noto Serif CJK SC", serif;
+  background: var(--bg); color: var(--ink);
+  max-width: 46rem; margin: 2.5rem auto; padding: 0 1.25rem;
+  line-height: 1.75; font-size: 17px;
+}
+h1 { font-size: 1.55rem; border-bottom: 2px solid var(--ink); padding-bottom: .4rem; }
+h2 { font-size: 1.2rem; margin-top: 2.2rem; color: var(--accent); }
+h3 { font-size: 1.05rem; margin-top: 1.4rem; }
+code, pre {
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: .88em; background: #f3efe6; border-radius: 4px;
+}
+code { padding: .1em .35em; }
+pre { padding: .8rem 1rem; overflow-x: auto; border-left: 3px solid var(--accent); line-height: 1.5; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .95em; }
+th, td { border: 1px solid var(--line); padding: .4rem .6rem; text-align: left; }
+th { background: #f3efe6; }
+blockquote { border-left: 3px solid var(--line); margin: 1rem 0; padding: .2rem 1rem; color: var(--muted); }
+a { color: var(--accent); }
+.meta { color: var(--muted); font-size: .85em; }
+.callout { background: #f7f2e7; border: 1px solid var(--line); border-radius: 6px; padding: .8rem 1rem; margin: 1rem 0; }
+.callout b { color: var(--accent); }
+
+/* 测验组件 */
+.quiz { border: 1px solid var(--line); border-radius: 6px; padding: 1rem 1.2rem; margin: 1.2rem 0; background: #fffdf9; }
+.quiz .q { font-weight: bold; margin-bottom: .6rem; }
+.quiz .opt { display: block; margin: .35rem 0; padding: .45rem .7rem; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; font-family: inherit; font-size: .95em; background: transparent; width: 100%; text-align: left; }
+.quiz .opt:hover { background: #f3efe6; }
+.quiz .opt.correct { border-color: var(--ok); background: #e8f5e9; }
+.quiz .opt.wrong { border-color: var(--bad); background: #ffebee; }
+.quiz .why { display: none; margin-top: .5rem; font-size: .9em; color: var(--muted); }
+.quiz .why.show { display: block; }
+.score { font-size: 1.05rem; font-weight: bold; margin-top: 1rem; display: none; }
+.score.show { display: block; color: var(--accent); }
+
+</style>
+<style>
+  body { max-width: 1000px; }
+  .anim-wrap { margin-top: 1.4rem; }
+
+  /* ── 控制条 ─────────────────────────── */
+  .fp-bar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: .6rem; }
+  .fp-bar button {
+    font-family: inherit; font-size: .92em; padding: .35rem .8rem;
+    border: 1.5px solid var(--ink); border-radius: 5px; background: #fffdf9;
+    cursor: pointer; line-height: 1.4;
+  }
+  .fp-bar button:hover { background: #f3efe6; }
+  .fp-bar .fp-play.playing { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .fp-title { margin-left: auto; font-size: .95em; color: var(--muted); font-style: italic; }
+  .fp-dots { display: flex; gap: .35rem; margin-bottom: .8rem; }
+  .fp-dot { width: 13px; height: 13px; border-radius: 50%; border: 1.5px solid var(--line); background: transparent; padding: 0; cursor: pointer; }
+  .fp-dot.on { background: var(--accent); border-color: var(--accent); }
+
+  /* ── 舞台 ───────────────────────────── */
+  .fp-stage-outer { overflow-x: auto; border: 2px solid var(--ink); border-radius: 8px; background:
+    repeating-linear-gradient(0deg, transparent 0 34px, #f0ebe0 34px 35px),
+    repeating-linear-gradient(90deg, transparent 0 34px, #f0ebe0 34px 35px), #faf7f0; }
+  .fp-stage { position: relative; width: 920px; height: 500px; }
+  .fp-edges { position: absolute; inset: 0; pointer-events: none; }
+  .fp-edge { stroke: #cfc5b4; stroke-width: 2; stroke-dasharray: 7 7; }
+
+  .fp-node {
+    position: absolute; border: 2px solid var(--ink); border-radius: 8px;
+    background: #fffdf9; padding: .45rem .6rem; font-size: .84em; line-height: 1.45;
+    box-shadow: 2px 3px 0 rgba(26,26,26,.14); transition: box-shadow .25s, transform .25s;
+  }
+  .fp-node b { font-size: 1.02em; }
+  .fp-node .sub { color: var(--muted); font-size: .88em; }
+  .fp-node.fp-hot { box-shadow: 0 0 0 4px rgba(179,84,30,.45), 3px 4px 0 rgba(26,26,26,.18); transform: translateY(-2px); }
+  .fp-node.fp-hit { background: #f7e8d8; }
+
+  .fp-screen {
+    margin-top: .35rem; background: #eee9df; border: 1.5px solid var(--line);
+    border-radius: 4px; min-height: 62px; padding: .3rem .4rem; font-size: .78em;
+  }
+  .scr-blank { color: var(--muted); text-align: center; margin-top: 1.2rem; }
+  .scr-code { font-family: Consolas, monospace; font-size: .92em; color: #555; white-space: pre-wrap; }
+  .scr-caption { text-align: center; color: var(--muted); font-size: .88em; }
+  .scr-chip { display: inline-block; background: #ffe9d6; border: 1px solid var(--accent);
+    border-radius: 4px; padding: 0 .3em; font-family: Consolas, monospace; font-size: .95em; }
+  .scr-line-bad { color: var(--bad); font-weight: bold; }
+  .scr-line-ok { color: #2e7d32; }
+
+  /* ── 报文 ───────────────────────────── */
+  .fp-packets { position: absolute; inset: 0; pointer-events: none; }
+  .fp-packet {
+    position: absolute; left: 0; top: 0; white-space: nowrap;
+    color: #fff; font-size: 12.5px; font-family: "JetBrains Mono", Consolas, monospace;
+    padding: 3px 10px; border-radius: 999px; box-shadow: 0 2px 6px rgba(0,0,0,.28); z-index: 30;
+  }
+  .k-req  { background: #1e6091; }
+  .k-resp { background: #b3541e; }
+  .k-file { background: #2e7d32; }
+  .k-dns  { background: #6a4c93; }
+  .k-data { background: #ad1457; }
+
+  /* ── 解说 + 证据 ────────────────────── */
+  .fp-panels { display: flex; gap: .9rem; margin-top: .9rem; align-items: stretch; }
+  .fp-note { flex: 1.25; background: #fffdf9; border: 1.5px solid var(--line); border-radius: 8px;
+    padding: .8rem 1rem; font-size: .98em; }
+  .fp-note .tag, .fp-evidence .tag { display: block; font-size: .78em; letter-spacing: .12em;
+    color: var(--muted); margin-bottom: .3rem; }
+  .fp-evidence { flex: 1; background: #14110c; color: #d8c9a3; border-radius: 8px;
+    padding: .8rem 1rem; font-family: "JetBrains Mono", Consolas, monospace; font-size: .8em;
+    white-space: pre-wrap; line-height: 1.65; }
+  .fp-evidence .tag { color: #8a7a55; }
+  .fp-evidence b { color: #f0c987; font-weight: normal; }
+
+  /* ── 实验 ──────────────────────────── */
+  .lab { margin-top: 2rem; border: 2px solid var(--accent); border-radius: 8px; padding: 1rem 1.2rem; background: #fffdf9; }
+  .lab h3 { margin-top: 0; color: var(--accent); }
+  .lab button { font-family: inherit; font-size: 1em; padding: .5rem 1.1rem; border: 2px solid var(--ink);
+    border-radius: 6px; background: #fdf1e6; cursor: pointer; margin-right: .6rem; }
+  .lab button:hover { background: #f7e3cd; }
+  .lab .msg { margin-top: .6rem; min-height: 1.6em; font-size: .95em; }
+  kbd { border: 1px solid var(--line); border-bottom-width: 2.5px; border-radius: 4px;
+    padding: 0 .4em; font-family: inherit; font-size: .88em; background: #f3efe6; }
+</style>
+</head>
+<body>
+
+<h1>动画：MES 定时任务的分布式锁——两台实例抢一块牌子</h1>
+<p class="meta">证据全部实勘自生产代码（只读，已脱敏） ｜ 操作：<kbd>←</kbd><kbd>→</kbd> 逐帧，<kbd>空格</kbd> 自动播放（默认🐢慢速，右上角可切）</p>
+
+<div class="callout">
+<b>一句话总纲：</b>锁 = 一块<b>所有进程都看得见的、只有一块的牌子</b>。进程多了以后 synchronized 够不着（各挂各的=没锁），就把牌子挂到人人相连的 Redis 上：<b>SET NX 挂牌、TTL 防失踪、watchdog 防早衰、Lua 验名摘牌</b>——Redisson 把后三件事打包好了，MES 定时任务用的就是它。
+</div>
+
+<div class="anim-wrap">
+  <div class="fp-bar">
+    <button data-fp="reset">⏮ 重置</button>
+    <button data-fp="prev">◀ 上一帧</button>
+    <button data-fp="play" class="fp-play">▶ 自动播放</button>
+    <button data-fp="next">下一帧 ▶</button>
+    <button id="spdBtn">🐢 慢速中 · 点切常速</button>
+    <span class="fp-title" id="fpTitle"></span>
+  </div>
+  <div class="fp-dots" id="fpDots"></div>
+
+  <div class="fp-stage-outer">
+    <div class="fp-stage" id="stage">
+
+      <div class="fp-node" data-node="boss" style="left:330px; top:12px; width:240px;">
+        <b>📣 调度中心 TaskServer</b><br>
+        <span class="sub">wk-platform · 读任务表 cron<br>到点往频道喊话（广播）</span>
+      </div>
+
+      <div class="fp-node" data-node="redis" style="left:655px; top:12px; width:250px;">
+        <b>📋 Redis 公告板</b> <span class="sub">:6379 db15</span>
+        <div class="fp-screen" id="kv"><div class="scr-blank">（空）</div></div>
+      </div>
+
+      <div class="fp-node" data-node="jvmA" style="left:16px; top:160px; width:272px;">
+        <b>☕ 实例A · wk-export</b> <span class="sub">@ 主机A</span>
+        <div class="fp-screen" id="logA"><div class="scr-blank">（未启动）</div></div>
+      </div>
+
+      <div class="fp-node" data-node="jvmB" style="left:322px; top:160px; width:272px;">
+        <b>☕ 实例B · wk-export</b> <span class="sub">@ 主机B（教学假设的第二台）</span>
+        <div class="fp-screen" id="logB"><div class="scr-blank">（未启动）</div></div>
+      </div>
+
+      <div class="fp-node" data-node="mysql" style="left:655px; top:330px; width:250px;">
+        <b>🐬 MySQL</b><br>
+        <span class="sub">月报表 / 工单真数据<br>（谁跑任务谁写这里）</span>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="fp-panels">
+    <div class="fp-note"><span class="tag">大白话解说</span><span id="fpNote"></span></div>
+    <div class="fp-evidence"><span class="tag">实勘证据（生产实勘 · 2026-11-11）</span><span id="fpEvidence"></span></div>
+  </div>
+</div>
+
+<div class="lab" id="lab">
+  <h3>🔥 实验：亲手制造"坑②·干得久，牌先没"（点按钮重演）</h3>
+  <p>任务要跑 60 秒，锁的 TTL 只有 30 秒。左边按钮=裸 SET NX（无看门狗）重演双跑事故；右边按钮=Redisson 默认武器（watchdog）重演平安版。观察右上角 Redis 公告板的 TTL 变化。</p>
+  <button id="labBad">☠️ 裸 SET NX，快进 31 秒</button>
+  <button id="labGood">🐕 带上 watchdog 重演</button>
+  <div class="msg" id="labMsg">（还没开始）</div>
+</div>
+
+<p class="meta">动画引擎：FlowPlayer（手账风组件，与 <a href="/blog/posts/system-design/redis-distributed-lock-deep-dive">配套博文</a>同源）。键盘 ← → 逐帧，空格自动播放。</p>
+
+<script>
+/* flow-player.js · 通用帧动画引擎（教学工作区共享组件）
+ *
+ * 用法：页面上摆好带 data-node="id" 的节点（绝对定位），然后：
+ *   FlowPlayer.init({
+ *     stage:   舞台元素,
+ *     frames:  帧数组,
+ *     edges:   [["a","b"], ...]          // 可选，画静态虚线
+ *     note:    解说文字元素, evidence: 证据面板元素,
+ *     title:   帧标题元素, dots: 进度点容器,
+ *     onFrame: (f) => {}                 // 可选钩子
+ *     speed:   每条报文飞行毫秒（默认 1150）
+ *     holdMs:  自动播放一帧播完后，读完解说再前进的停留毫秒（默认 2100）
+ *   });
+ *
+ * 帧格式：
+ *   { title, note, evidence,
+ *     packets: [{from:"节点id", to:"节点id", label:"报文文字", kind:"req|resp|file|dns|data"}],
+ *     highlight: ["节点id", ...],      // 点亮的节点（含节点内子元素也可给 data-node）
+ *     mutate: (stage) => {}            // 帧开始时的自定义 DOM 改动
+ *   }
+ *
+ * 报文按数组顺序逐个飞行；kind 决定颜色。控制：prev/play/next/reset + 键盘 ←→ 空格。
+ */
+window.FlowPlayer = (function () {
+  const SVGNS = "http://www.w3.org/2000/svg";
+
+  function center(el, stage) {
+    const s = stage.getBoundingClientRect(), r = el.getBoundingClientRect();
+    return { x: r.left - s.left + r.width / 2, y: r.top - s.top + r.height / 2 };
+  }
+
+  function init(opts) {
+    const stage = opts.stage, frames = opts.frames;
+    const nodes = {};
+    stage.querySelectorAll("[data-node]").forEach((n) => (nodes[n.dataset.node] = n));
+
+    // 静态连线层
+    let svg = stage.querySelector("svg.fp-edges");
+    if (!svg) {
+      svg = document.createElementNS(SVGNS, "svg");
+      svg.classList.add("fp-edges");
+      stage.prepend(svg);
+    }
+    const size = () => {
+      svg.setAttribute("width", stage.offsetWidth);
+      svg.setAttribute("height", stage.offsetHeight);
+    };
+    size();
+    (opts.edges || []).forEach(([a, b]) => {
+      const A = center(nodes[a], stage), B = center(nodes[b], stage);
+      const l = document.createElementNS(SVGNS, "line");
+      l.setAttribute("x1", A.x); l.setAttribute("y1", A.y);
+      l.setAttribute("x2", B.x); l.setAttribute("y2", B.y);
+      l.classList.add("fp-edge");
+      svg.appendChild(l);
+    });
+
+    const layer = document.createElement("div");
+    layer.className = "fp-packets";
+    stage.appendChild(layer);
+
+    let idx = -1, auto = false, autoTimer = null, busy = false;
+
+    const dots = opts.dots;
+    if (dots) {
+      frames.forEach((_, k) => {
+        const d = document.createElement("button");
+        d.className = "fp-dot";
+        d.title = frames[k].title || ("第" + (k + 1) + "帧");
+        d.onclick = () => go(k);
+        dots.appendChild(d);
+      });
+    }
+
+    function clearPackets() { layer.innerHTML = ""; }
+
+    function setHighlight(ids) {
+      Object.entries(nodes).forEach(([k, el]) =>
+        el.classList.toggle("fp-hot", (ids || []).includes(k)));
+    }
+
+    function fly(p) {
+      return new Promise((res) => {
+        const A = center(nodes[p.from], stage), B = center(nodes[p.to], stage);
+        const el = document.createElement("div");
+        el.className = "fp-packet k-" + (p.kind || "req");
+        el.textContent = p.label;
+        layer.appendChild(el);
+        const w = el.offsetWidth, h = el.offsetHeight;
+        const anim = el.animate(
+          [
+            { transform: `translate(${A.x - w / 2}px, ${A.y - h / 2 - 14}px)`, opacity: 0 },
+            { transform: `translate(${A.x - w / 2}px, ${A.y - h / 2 - 14}px)`, opacity: 1, offset: 0.12 },
+            { transform: `translate(${B.x - w / 2}px, ${B.y - h / 2 - 14}px)`, opacity: 1, offset: 0.9 },
+            { transform: `translate(${B.x - w / 2}px, ${B.y - h / 2 - 14}px)`, opacity: 0 }
+          ],
+          { duration: opts.speed || 1150, easing: "cubic-bezier(.45,.05,.55,.95)" }
+        );
+        nodes[p.to].classList.add("fp-hit");
+        setTimeout(() => nodes[p.to].classList.remove("fp-hit"), 420);
+        anim.onfinish = () => { el.remove(); res(); };
+      });
+    }
+
+    async function runFrame(f) {
+      if (f.mutate) f.mutate(stage);
+      setHighlight(f.highlight);
+      for (const p of f.packets || []) await fly(p);
+    }
+
+    function paintMeta(f) {
+      if (opts.title) opts.title.innerHTML = f.title || "";
+      if (opts.note) opts.note.innerHTML = f.note || "";
+      if (opts.evidence) opts.evidence.innerHTML = f.evidence || "";
+      if (dots) [...dots.children].forEach((d, k) =>
+        d.classList.toggle("on", k === idx));
+      if (opts.onFrame) opts.onFrame(f, idx);
+    }
+
+    async function go(k) {
+      if (busy || k < 0 || k >= frames.length) return;
+      idx = k; busy = true;
+      clearPackets(); setHighlight([]);
+      paintMeta(frames[idx]);
+      await runFrame(frames[idx]);
+      busy = false;
+      if (auto) scheduleAuto();
+    }
+
+    function scheduleAuto() {
+      clearTimeout(autoTimer);
+      const f = frames[idx];
+      const pktMs = ((f.packets || []).length * (opts.speed || 1150)) + 400;
+      autoTimer = setTimeout(() => {
+        if (!auto) return;
+        if (idx >= frames.length - 1) { toggleAuto(false); return; }
+        go(idx + 1);
+      }, pktMs + (opts.holdMs || 2100));
+    }
+
+    function toggleAuto(force) {
+      auto = force !== undefined ? force : !auto;
+      document.querySelectorAll(".fp-play").forEach((b) =>
+        b.classList.toggle("playing", auto));
+      if (auto) { if (idx >= frames.length - 1) go(0); else scheduleAuto(); }
+      else clearTimeout(autoTimer);
+    }
+
+    const next = () => !busy && go(Math.min(idx + 1, frames.length - 1));
+    const prev = () => !busy && go(Math.max(idx - 1, 0));
+
+    document.querySelectorAll("[data-fp]").forEach((b) => {
+      const act = b.dataset.fp;
+      b.onclick = () => ({
+        next, prev, play: () => toggleAuto(), reset: () => { toggleAuto(false); go(0); }
+      }[act]());
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight") next();
+      else if (e.key === "ArrowLeft") prev();
+      else if (e.key === " ") { e.preventDefault(); toggleAuto(); }
+    });
+
+    go(0);
+    return { go, next, prev, fly };
+  }
+
+  return { init };
+})();
+
+</script>
+<script>
+const kv = () => document.getElementById("kv");
+const logA = () => document.getElementById("logA");
+const logB = () => document.getElementById("logB");
+const KEY = '<span class="scr-chip">wk:job:execute:expJob:dayReport</span>';
+
+/* Redis 公告板内视屏状态 */
+const KV = {
+  blank:  '<div class="scr-blank">（空公告板）</div>',
+  empty:  '<div class="scr-caption">公告板现状：</div><div class="scr-code">KEYS wk:job:*  → (empty)</div>',
+  lockA:  '<div class="scr-caption">牌子挂上了：</div><div class="scr-code">' + KEY + '<br> 值 = A:uuid1  <span class="scr-line-ok">TTL 30s ⏳</span></div>',
+  lockA10:'<div class="scr-caption">时间流逝…</div><div class="scr-code">' + KEY + '<br> 值 = A:uuid1  <span class="scr-line-bad">TTL 10s ⏳⏳</span></div>',
+  gone:   '<div class="scr-caption">30 秒到：</div><div class="scr-code">KEYS wk:job:*  → (empty)  <span class="scr-line-bad">←牌子自动蒸发</span></div>',
+  lockB:  '<div class="scr-caption">B 挂上了新牌：</div><div class="scr-code">' + KEY + '<br> 值 = B:uuid2  TTL 30s ⏳</div>',
+  renew:  '<div class="scr-caption">watchdog 刚续过：</div><div class="scr-code">' + KEY + '<br> 值 = A:uuid1  <span class="scr-line-ok">TTL 重置 30s ↻</span></div>'
+};
+
+/* 两台实例控制台状态 */
+const LOG = {
+  Aoff:   '<div class="scr-blank">（进程未启动）</div>',
+  Aalone: '<div class="scr-code">[23:00] 定时任务触发\n[23:00] <span class="scr-line-ok">synchronized ✓（单进程，够用）</span>\n[23:00] 跑月报表…完成 ✔</div>',
+  Async:  '<div class="scr-code">[23:00] synchronized ✓ 我是主人\n[23:00] 跑月报表…</div>',
+  Alock:  '<div class="scr-code">[23:00:00.002] <span class="scr-line-ok">tryLock ✓ 抢到牌，开跑</span></div>',
+  Awork:  '<div class="scr-code">[23:00:00.002] tryLock ✓ 抢到，开跑\n[23:00:03] 查 MySQL 汇总中…\n[23:00:05] ✔ 完工，摘牌 + 向调度中心汇报</div>',
+  Adead:  '<div class="scr-code">[23:00:00.002] tryLock ✓ 抢到，开跑\n[23:00:01] <span class="scr-line-bad">💀 进程断电，再也没回来</span></div>',
+  Aslow:  '<div class="scr-code">[23:00:00] tryLock ✓ 开跑\n[23:00:31] <span class="scr-line-bad">还在跑 SQL（任务要 60s）…</span></div>',
+  Astuck: '<div class="scr-code">[23:00:00] tryLock ✓ 开跑\n[23:00:10] <span class="scr-line-bad">GC 卡住 35s…（醒来锁早没了）</span>\n[23:00:45] 跑完，顺手摘牌 → <span class="scr-line-bad">摘的是 B 的牌！</span></div>',
+  Boff:   '<div class="scr-blank">（进程未启动）</div>',
+  Bsync:  '<div class="scr-code">[23:00] synchronized ✓ 我是主人\n[23:00] 跑月报表…</div>',
+  Bwait:  '<div class="scr-code">[23:00:00.003] tryLock → <span class="scr-line-bad">(nil) 被挡</span>\n[23:00:00.003] Locked，睡觉 😴</div>',
+  Brun:   '<div class="scr-code">[23:00:31] 牌子蒸发，tryLock ✓\n[23:00:31] <span class="scr-line-bad">开跑月报表（第 2 份！）</span></div>',
+  Bsleep: '<div class="scr-code">[23:00:00.003] tryLock → (nil) 被挡\n[23:00:00.003] Locked，睡觉 😴\n（watchdog 在给 A 续期，无机可乘）</div>',
+  Bdev:   '<div class="scr-code">[你 IDEA 里的调试实例]\n[23:00:00.002] <span class="scr-line-bad">tryLock ✓ 抢赢了生产实例！</span>\n[23:00:05] <span class="scr-line-bad">任务跑在你电脑上，写了生产库</span></div>'
+};
+
+const frames = [
+  {
+    title: "第1步 · 单机时代：自己的牌子够用",
+    note: "只有一个 wk-export 进程时，<b>synchronized</b> 就是全部——它往<b>自己 JVM 的内存</b>里挂牌，管住同一进程里的所有线程。牌子贴哪很重要：贴在自己楼里，只有自己楼里的线程看得见。",
+    evidence: "MES 事实：一台服务器上 9 个 jar 各是<b>独立进程</b>，\n各揣一个 JVM、一块各自的内存。\nsynchronized 的标记 = 进程私有内存里的对象头，\n<b>进程外物理不可见</b>。",
+    highlight: ["jvmA"],
+    mutate: () => { logA().innerHTML = LOG.Aalone; logB().innerHTML = LOG.Boff; kv().innerHTML = KV.blank; }
+  },
+  {
+    title: "第2步 · 加一台机器，事故了（推演）",
+    packets: [
+      { from: "jvmA", to: "mysql", label: "INSERT 月报表", kind: "data" },
+      { from: "jvmB", to: "mysql", label: "INSERT 月报表（第2份！）", kind: "data" }
+    ],
+    note: "公司为高可用再部署一台（<b>教学假设</b>，MES 现为单机多 jar）。两个进程 = 两栋<b>隔音楼</b>：各挂各的 synchronized 牌子，各自觉得「我是主人」——<b>牌子各挂各的 = 没锁</b>。月报表跑两遍、消息推两遍。",
+    evidence: "判据一句话：\n锁的标记必须放在\n<b>所有参赛者都看得见的地方</b>。\n进程内存 ✗ → 那哪里人人都看得见？",
+    highlight: ["jvmA", "jvmB", "mysql"],
+    mutate: () => { logA().innerHTML = LOG.Async; logB().innerHTML = LOG.Bsync; }
+  },
+  {
+    title: "第3步 · 全厂公告板：Redis",
+    packets: [
+      { from: "jvmA", to: "redis", label: "启动：连接池就绪", kind: "req" },
+      { from: "jvmB", to: "redis", label: "启动：连接池就绪", kind: "req" }
+    ],
+    note: "启动时每个进程都连上 <b>.101 同一个 Redis</b>（0007 讲过的连接三层）——它是全厂唯一<b>人人都看得见、都够得着</b>的公共区域。牌子搬家：从进程内存搬到 Redis 的一个 key 上。",
+    evidence: "wk-platform application-pro.yaml：\n  redis:    host 10.0.0.1  database 15\n  redisson: mode single → 同一台（password ******）\n两套客户端连同一公告板：Jedis 存数据，Redisson 抢牌子",
+    highlight: ["redis", "jvmA", "jvmB"],
+    mutate: () => { kv().innerHTML = KV.empty; }
+  },
+  {
+    title: "第4步 · A 挂牌：SET NX",
+    packets: [
+      { from: "jvmA", to: "redis", label: "SET wk:job:…:dayReport  A:uuid1  NX PX 30000", kind: "req" },
+      { from: "redis", to: "jvmA", label: "OK", kind: "resp" }
+    ],
+    note: "挂牌 = 一条命令。<b>NX（Not eXists）</b>：墙上还没这块牌我才挂得上——「看一眼 + 挂上」一个原子动作。值写上 A 的 UUID（第 10 步有大用），<b>PX 30000</b> 带 30 秒 TTL（第 7 步有大用）。",
+    evidence: "锁 key 真名（RedisConstant.java:68）：\n  JOB_EXECUTE = \"wk:\" + \"job:execute:\"\n  + iocBean名 + \":\" + 任务名\n= wk:job:execute:expJob:dayReport",
+    highlight: ["jvmA", "redis"],
+    mutate: () => { kv().innerHTML = KV.lockA; logA().innerHTML = LOG.Alock; }
+  },
+  {
+    title: "第5步 · B 也来挂：被 NX 挡住",
+    packets: [
+      { from: "jvmB", to: "redis", label: "SET wk:job:…:dayReport  B:uuid2  NX", kind: "req" },
+      { from: "redis", to: "jvmB", label: "(nil) 牌子已存在", kind: "resp" }
+    ],
+    note: "就算两人<b>同一毫秒</b>冲到公告板前：Redis <b>单线程排队</b>逐条执行，第一条挂上，第二条进来时 key 已存在，NX 当场拒绝。<b>「只有一块牌」由 Redis 本身保证</b>——这就是选它、而不是 MySQL 当公告板的原因。",
+    evidence: "B 的真实待遇（SJobAopInterceptor.java:58）：\n  log.info(\"SJob iocName:{} jobName:{} <b>Locked</b>\", …)\n= 打一行日志，本轮退出。不重试、不报错。",
+    highlight: ["jvmB", "redis"],
+    mutate: () => { logB().innerHTML = LOG.Bwait; }
+  },
+  {
+    title: "第6步 · A 干活、摘牌、汇报",
+    packets: [
+      { from: "jvmA", to: "mysql", label: "SELECT 汇总数据", kind: "data" },
+      { from: "mysql", to: "jvmA", label: "数据行", kind: "data" },
+      { from: "jvmA", to: "redis", label: "unlock：验名摘牌（Lua）", kind: "req" },
+      { from: "jvmA", to: "boss", label: "汇报：jobId 耗时 成功", kind: "resp" }
+    ],
+    note: "抢到的人干活 → 摘牌 → 向调度中心汇报（失败也汇报，:60-65 catch）。下一轮 23:05 重新抢，<b>不一定还是 A 赢</b>——谁活着谁手快谁干，任何一台宕机任务不停。这就是「抢」优于「配置写死主机」的地方。",
+    evidence: "汇报真码（SJobAopInterceptor.java:53-55, :69-80）：\n  chain.doChain();  // 真跑任务\n  doSendMessage(…jobId, instanceId…)\n  → pubSubService.fire(JOB_SUBSCRIBE, JobInfo)",
+    highlight: ["jvmA", "mysql", "redis", "boss"],
+    mutate: () => { kv().innerHTML = KV.empty; logA().innerHTML = LOG.Awork; }
+  },
+  {
+    title: "第7步 · 坑①：挂了牌的人失踪了",
+    note: "A 挂牌后 1 秒断电——<b>永远没人来 DEL</b>。若牌子没有 TTL：B 每一轮都 Locked，任务<b>永远没人跑</b>（死锁）。救星就是第 4 步埋的 <b>PX 30000</b>：没人续期，牌子 30 秒后自动蒸发，系统自愈。<b>TTL 保的不是「别人进不来」，是「持牌人失踪后能恢复」</b>。",
+    evidence: "这是手写 SETNX 忘配 EXPIRE 的经典事故。\n第 4 步的 PX 30000 = 从第一天就上了保险。\n反问：TTL 有了，新问题是什么？→ 下一步",
+    highlight: ["jvmA", "redis"],
+    mutate: () => { kv().innerHTML = KV.gone; logA().innerHTML = LOG.Adead; }
+  },
+  {
+    title: "第8步 · 坑②：活干久了，牌先没了",
+    packets: [
+      { from: "redis", to: "jvmB", label: "(key 蒸发，牌子空了)", kind: "resp" },
+      { from: "jvmB", to: "redis", label: "SET … B:uuid2  NX PX 30000", kind: "req" }
+    ],
+    note: "任务要跑 <b>60 秒</b>，TTL 只有 30 秒——第 30 秒牌子蒸发，B 大摇大摆挂上自己的牌开跑。A 还在埋头算数……<b>月报表第 2 份诞生</b>。过期保命机制反过来制造了重复执行，坑①的解药成了坑②的毒药。",
+    evidence: "时间线：\n00s A 挂牌开跑（任务需 60s）\n30s TTL 到 → key 蒸发\n30s B SET NX ✓ → 开跑\n31s <b>两个进程同时在跑同一个任务</b> ✗",
+    highlight: ["jvmA", "jvmB", "redis"],
+    mutate: () => { kv().innerHTML = KV.lockA10; logA().innerHTML = LOG.Aslow; logB().innerHTML = LOG.Brun; }
+  },
+  {
+    title: "第9步 · watchdog：我还活着，别收牌",
+    packets: [
+      { from: "jvmA", to: "redis", label: "watchdog: EXPIRE 续 +30s（每10s一次）", kind: "resp" },
+      { from: "jvmA", to: "redis", label: "watchdog: EXPIRE 续 +30s …", kind: "resp" }
+    ],
+    note: "Redisson 的看门狗：拿到锁后<b>每 10 秒</b>（30s÷3）自动把 TTL 重置回 30s。进程活着就一直续——任务跑 60s、600s 都行；进程死/断连，续期自然停止，30 秒后牌子蒸发（坑①仍兜底）。<b>坑①坑②一枪双雕</b>。生效前提：tryLock <b>不传 leaseTime</b>——MES 正是这种写法。",
+    evidence: "Redisson 官方 wiki：\nlockWatchdogTimeout 默认 30000ms\n→ 每 30/3 = 10s 续一次，每次续回 30s\n前提：未显式指定 leaseTime",
+    highlight: ["jvmA", "redis"],
+    mutate: () => { kv().innerHTML = KV.renew; logA().innerHTML = LOG.Alock; logB().innerHTML = LOG.Bsleep; }
+  },
+  {
+    title: "第10步 · 坑③：摘错别人的牌",
+    packets: [
+      { from: "jvmA", to: "redis", label: "⚠ DEL —— 摘走了 B 刚挂的牌", kind: "req" }
+    ],
+    note: "最阴的坑：A GC 卡了 35s（牌子 30s 时蒸发）→ B 挂新牌开跑 → A 醒来跑完顺手 DEL——<b>摘的是 B 的牌</b>，下一秒第三者也能进场。解法 = 第 4 步埋的 UUID：unlock 前用 <b>Lua 原子</b>验「牌背的名字是不是我」，不是就不摘。A 只能作罢（白跑，靠业务幂等兜底）。",
+    evidence: "unlock 的 Lua（Redisson 内置，示意）：\n  if redis.call('hget', key, 我的ID)\n     then redis.call('del', key)\n  验名 + 摘牌 一条脚本原子完成\n牌背名字 = 第 4 步那个 A:uuid1",
+    highlight: ["jvmA", "redis"],
+    mutate: () => { logA().innerHTML = LOG.Astuck; kv().innerHTML = KV.lockB; }
+  },
+  {
+    title: "第11步 · 总账一：三坑三解，为什么不手搓",
+    note: "手写 Jedis SET NX 要自己背三个坑：①失踪死锁→TTL；②干久早衰→续期；③摘错人牌→UUID+Lua。<b>Redisson 的 RLock 一个对象全包</b>（watchdog 自动续、UUID 自动写、Lua 自动验）。MES 因此单独给 Redisson 配了 redisson: 配置段——Jedis 存数据，Redisson 管协调。",
+    evidence: "MES 双客户端分工（application-pro.yaml）：\n  redis:    段 → Jedis → 缓存/限流/验证码\n  redisson: 段 → RLock → 定时任务分布式锁\n一个 Redis 服务，两个客户端程序\n（key 当数据用 / key 当牌子用）",
+    highlight: ["redis"]
+  },
+  {
+    title: "第12步 · MES 真代码逐行翻译",
+    packets: [
+      { from: "jvmA", to: "redis", label: "tryLock：等牌最多 3 秒", kind: "req" },
+      { from: "redis", to: "jvmA", label: "✓ 拿到（或 3s 超时 false）", kind: "resp" }
+    ],
+    note: "三行翻译：<b>getLock</b> = 领一块命名牌子（key=前缀+bean名+任务名）；<b>tryLock(3, SECONDS)</b> = 冲到公告板前<b>最多等 3 秒</b>——等的是「别人早点摘牌」，不是「我能拿 3 秒」；<b>else log</b> = 没抢到打一行 Locked 睡觉。",
+    evidence: "SJobAopInterceptor.java:51-58（逐字）：\n  RLock rLock = redissonClient.getLock(\n    RedisConstant.JOB_EXECUTE + iocBean.name()\n    + \":\" + sJob.value());\n  if (rLock.tryLock(3, TimeUnit.SECONDS)) {\n    chain.doChain(); …\n  } else { log.info(\"… <b>Locked</b>\"); }",
+    highlight: ["jvmA", "redis"]
+  },
+  {
+    title: "第13步 · 广播 → 抢锁：全景闭环",
+    packets: [
+      { from: "boss", to: "jvmA", label: "📢 wk:job:publish:dayReport", kind: "req" },
+      { from: "boss", to: "jvmB", label: "📢 同一条广播（人人都听见）", kind: "req" },
+      { from: "jvmA", to: "redis", label: "SET NX → OK", kind: "req" },
+      { from: "jvmB", to: "redis", label: "SET NX → (nil)", kind: "req" },
+      { from: "jvmA", to: "mysql", label: "干活", kind: "data" },
+      { from: "jvmA", to: "boss", label: "汇报 jobId/耗时", kind: "resp" }
+    ],
+    note: "串起来：每个服务启动时把 @SJob 任务<b>订阅</b>到频道；到点调度中心往频道喊一声——<b>pub/sub 广播，进群的每个实例都收到</b>，人人都反射调用方法；外面套的这把锁把「人人听见」收敛成「<b>只有一人动手</b>」。广播是放大器，锁是收敛器，缺一不可。",
+    evidence: "WkJobStarter.java:46 订阅：\n  pubSubService.reg(\n    RedisConstant.JOB_PUBLISH+\":\"+任务名, this)\n:66 收到广播 → method.invoke(…)\nJOB_PUBLISH = \"wk:job:publish\"（:58）",
+    highlight: ["boss", "jvmA", "jvmB", "redis", "mysql"]
+  },
+  {
+    title: "第14步 · 彩蛋：本地调试的你 + 判断口诀",
+    note: "真实踩坑位：你在 IDEA 起 wk-platform 调试、redisson: 指向生产 .101——<b>你的本地实例也进群了</b>，23:00 和生产实例同时抢锁。你抢赢了，任务就跑在你电脑上、写进生产库。三防：本地配置指本地 Redis / 调试期注释 @SJob / 别断点停在任务里。<br><br><b>判断口诀：这段逻辑全公司只允许一个人在干吗？是 → 服务从 1 台变 2 台那一刻，就必须上分布式锁。</b>同款场景：定时任务、集群初始化、防重复提交、抢订单。",
+    evidence: "未定案彩蛋（诚实账）：\nSJobAopInterceptor 全文 81 行 + 全库\n<b>零处 unlock() 调用</b>——锁怎么释放\n（TTL 蒸发 or 隐藏机制）未定案。\n→ 开放题第 3 问：上生产只读看 TTL 定案",
+    highlight: ["jvmB"],
+    mutate: () => { logB().innerHTML = LOG.Bdev; }
+  }
+];
+
+const FP_OPTS = {
+  stage: document.getElementById("stage"),
+  frames,
+  edges: [["boss","jvmA"], ["boss","jvmB"], ["jvmA","redis"], ["jvmB","redis"], ["jvmA","mysql"], ["jvmB","mysql"]],
+  title: document.getElementById("fpTitle"),
+  note: document.getElementById("fpNote"),
+  evidence: document.getElementById("fpEvidence"),
+  dots: document.getElementById("fpDots"),
+  speed: 1600,     // 报文飞慢一点（引擎默认 1150）
+  holdMs: 7000     // 自动播放：一帧播完再留 7 秒读完解说（引擎默认 2100）
+};
+const player = FlowPlayer.init(FP_OPTS);
+
+/* 慢速/常速切换 */
+(function () {
+  const btn = document.getElementById("spdBtn");
+  let slow = true;
+  btn.onclick = () => {
+    slow = !slow;
+    FP_OPTS.speed = slow ? 1600 : 1150;
+    FP_OPTS.holdMs = slow ? 7000 : 2100;
+    btn.textContent = slow ? "🐢 慢速中 · 点切常速" : "🐇 常速中 · 点切慢速";
+  };
+})();
+
+/* ── 实验：坑② 亲手复现 ── */
+(function () {
+  const msg = document.getElementById("labMsg");
+  let busy = false;
+
+  document.getElementById("labBad").onclick = async () => {
+    if (busy) return; busy = true;
+    kv().innerHTML = KV.lockA;
+    logA().innerHTML = LOG.Alock; logB().innerHTML = LOG.Boff;
+    msg.innerHTML = "23:00:00 · A 挂牌（TTL 30s），开始跑要 60 秒的任务…";
+    await player.fly({ from: "jvmA", to: "redis", label: "SET … A:uuid1 NX PX 30000", kind: "req" });
+    kv().innerHTML = KV.lockA10;
+    msg.innerHTML = "23:00:20 · TTL 只剩 10 秒，A 的 SQL 还没跑完一半…";
+    await new Promise(r => setTimeout(r, 700));
+    kv().innerHTML = KV.gone;
+    msg.innerHTML = '<span style="color:var(--bad)"><b>23:00:30 · 牌子蒸发！</b>没有 watchdog，没人续期。</span>';
+    await player.fly({ from: "redis", to: "jvmB", label: "(key 不见了)", kind: "resp" });
+    await player.fly({ from: "jvmB", to: "redis", label: "SET … B:uuid2 NX → OK", kind: "req" });
+    kv().innerHTML = KV.lockB;
+    await player.fly({ from: "jvmB", to: "mysql", label: "INSERT 月报表（第2份！）", kind: "data" });
+    msg.innerHTML = '<b style="color:var(--bad)">事故成立：A 和 B 同时在跑同一任务，月报表出了两份。</b>右边按钮请出 watchdog 再试一次。';
+    logB().innerHTML = LOG.Brun;
+    busy = false;
+  };
+
+  document.getElementById("labGood").onclick = async () => {
+    if (busy) return; busy = true;
+    kv().innerHTML = KV.lockA;
+    logA().innerHTML = LOG.Alock; logB().innerHTML = LOG.Boff;
+    msg.innerHTML = "23:00:00 · 同样的开局：A 挂牌（TTL 30s），跑 60 秒的任务…";
+    await player.fly({ from: "jvmA", to: "redis", label: "SET … A:uuid1 NX PX 30000", kind: "req" });
+    kv().innerHTML = KV.renew;
+    await player.fly({ from: "jvmA", to: "redis", label: "🐕 +10s 续期（EXPIRE 重置 30s）", kind: "resp" });
+    kv().innerHTML = KV.renew;
+    await player.fly({ from: "jvmA", to: "redis", label: "🐕 +10s 又续…（任务没完就一直续）", kind: "resp" });
+    await player.fly({ from: "jvmB", to: "redis", label: "SET NX → (nil)", kind: "req" });
+    logB().innerHTML = LOG.Bsleep;
+    await player.fly({ from: "jvmA", to: "mysql", label: "干完 60s 的活", kind: "data" });
+    kv().innerHTML = KV.empty;
+    msg.innerHTML = '<b style="color:var(--ok)">平安无事：TTL 永远烧不到 0（每 10s 续回 30s），B 全程睡觉，任务只有一份。A 完工摘牌，锁使命结束。</b>';
+    logA().innerHTML = LOG.Awork;
+    busy = false;
+  };
+})();
+</script>
+
+</body>
+</html>
