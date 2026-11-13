@@ -18,6 +18,7 @@ export default defineConfig({
       {
         text: '系统设计学习',
         items: [
+          { text: '拆、复制、加速：九大架构模式与性能四把尺（MES 实勘对照）', link: '/posts/system-design/nine-architecture-patterns-performance' },
           { text: '一颗 Redis 养活微服务集群：分布式锁三段 Lua + 限流/缓存/发号器（含交互动画）', link: '/posts/system-design/redis-distributed-lock-deep-dive' },
           { text: 'Nginx 实勘、负载均衡与调优实战（含交互动画）', link: '/posts/system-design/nginx-production-lb-deep-dive' },
           { text: '同步/异步/并发/并行 + 进程/线程/协程', link: '/posts/system-design/sync-async-concurrency-parallel' },
